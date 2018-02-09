@@ -1,4 +1,5 @@
 require "her/model/associations/association"
+require "her/model/associations/association_proxy"
 require "her/model/associations/belongs_to_association"
 require "her/model/associations/has_many_association"
 require "her/model/associations/has_one_association"
@@ -33,6 +34,16 @@ module Her
           @_her_associations ||= begin
             superclass.respond_to?(:associations) ? superclass.associations.dup : Hash.new { |h,k| h[k] = [] }
           end
+        end
+
+        # @private
+        def association_names
+          associations.inject([]) { |memo, (name, details)| memo << details }.flatten.map { |a| a[:name] }
+        end
+
+        # @private
+        def association_keys
+          associations.inject([]) { |memo, (name, details)| memo << details }.flatten.map { |a| a[:data_key] }
         end
 
         # Parse associations data after initializing a new object

@@ -40,10 +40,9 @@ module Her
     # Supported ActiveModel modules
     include ActiveModel::AttributeMethods
     include ActiveModel::Validations
+    include ActiveModel::Validations::Callbacks
     include ActiveModel::Conversion
     include ActiveModel::Dirty
-    include ActiveModel::Naming
-    include ActiveModel::Translation
 
     # Class methods
     included do
@@ -62,9 +61,15 @@ module Her
       store_response_errors :response_errors
       store_metadata :metadata
 
+      # Include ActiveModel naming methods
+      extend ActiveModel::Translation
+
       # Configure ActiveModel callbacks
       extend ActiveModel::Callbacks
       define_model_callbacks :create, :update, :save, :find, :destroy, :initialize
+
+      # Define matchers for attr? and attr= methods
+      define_attribute_method_matchers
     end
   end
 end
