@@ -3,12 +3,14 @@ module Her
   # so it knows where to make those requests. In Rails, this is usually done in `config/initializers/her.rb`:
   class API
     # @private
-    attr_reader :base_uri, :connection, :options
+    attr_reader :connection, :options
+
+    # Constants
+    FARADAY_OPTIONS = [:request, :proxy, :ssl, :builder, :url, :parallel_manager, :params, :headers, :builder_class].freeze
 
     # Setup a default API connection. Accepted arguments and options are the same as {API#setup}.
     def self.setup(opts={}, &block)
-      @default_api = new
-      @default_api.setup(opts, &block)
+      @default_api = new(opts, &block)
     end
 
     # Create a new API object. This is useful to create multiple APIs and use them with the `uses_api` method.
@@ -24,14 +26,14 @@ module Her
     #     uses_api api
     #   end
     def initialize(*args, &blk)
-      self.setup(*args, &blk)
+      setup(*args, &blk)
     end
 
     # Setup the API connection.
     #
     # @param [Hash] opts the Faraday options
     # @option opts [String] :url The main HTTP API root (eg. `https://api.example.com`)
-    # @option opts [String] :ssl A hash containing [SSL options](https://github.com/technoweenie/faraday/wiki/Setting-up-SSL-certificates)
+    # @option opts [String] :ssl A hash containing [SSL options](https://github.com/lostisland/faraday/wiki/Setting-up-SSL-certificates)
     #
     # @return Faraday::Connection
     #
@@ -42,12 +44,13 @@ module Her
     #   class MyAuthentication < Faraday::Middleware
     #     def call(env)
     #       env[:request_headers]["X-API-Token"] = "bb2b2dd75413d32c1ac421d39e95b978d1819ff611f68fc2fdd5c8b9c7331192"
-    #       @all.call(env)
+    #       @app.call(env)
     #     end
     #   end
     #   Her::API.setup :url => "https://api.example.com" do |connection|
     #     connection.use Faraday::Request::UrlEncoded
     #     connection.use Her::Middleware::DefaultParseJSON
+    #     connection.use MyAuthentication
     #     connection.use Faraday::Adapter::NetHttp
     #   end
     #
@@ -67,9 +70,10 @@ module Her
     #   end
     def setup(opts={}, &blk)
       opts[:url] = opts.delete(:base_uri) if opts.include?(:base_uri) # Support legacy :base_uri option
-      @base_uri = opts[:url]
       @options = opts
-      @connection = Faraday.new(@options) do |connection|
+
+      faraday_options = @options.reject { |key, value| !FARADAY_OPTIONS.include?(key.to_sym) }
+      @connection = Faraday.new(faraday_options) do |connection|
         yield connection if block_given?
       end
       self
@@ -85,19 +89,26 @@ module Her
       path = opts.delete(:_path)
       headers = opts.delete(:_headers)
       opts.delete_if { |key, value| key.to_s =~ /^_/ } # Remove all internal parameters
-      response = @connection.send method do |request|
+      if method == :options
+        # Faraday doesn't support the OPTIONS verb because of a name collision with an internal options method
+        # so we need to call run_request directly.
         request.headers.merge!(headers) if headers
-        if method == :get
-          # For GET requests, treat additional parameters as querystring data
-          request.url path, opts
-        else
-          # For POST, PUT and DELETE requests, treat additional parameters as request body
-          request.url path
-          request.body = opts
+        response = @connection.run_request method, path, opts, headers
+      else
+        response = @connection.send method do |request|
+          request.headers.merge!(headers) if headers
+          if method == :get
+            # For GET requests, treat additional parameters as querystring data
+            request.url path, opts
+          else
+            # For POST, PUT and DELETE requests, treat additional parameters as request body
+            request.url path
+            request.body = opts
+          end
         end
       end
-
       { :parsed_data => response.env[:body], :response => response }
+
     end
 
     private

@@ -16,12 +16,17 @@ module Her
         end
 
         # @private
+        def self.proxy(parent, opts = {})
+          AssociationProxy.new new(parent, opts)
+        end
+
+        # @private
         def self.parse_single(association, klass, data)
           data_key = association[:data_key]
           return {} unless data[data_key]
 
           klass = klass.her_nearby_class(association[:class_name])
-          { association[:name] => klass.new(data[data_key]) }
+          { association[:name] => klass.instantiate_record(klass, data: data[data_key]) }
         end
 
         # @private
@@ -35,13 +40,16 @@ module Her
 
         # @private
         def fetch(opts = {})
-          return @opts[:default].try(:dup) if @parent.attributes.include?(@name) && @parent.attributes[@name].empty? && @params.empty?
+          attribute_value = @parent.attributes[@name]
+          return @opts[:default].try(:dup) if @parent.attributes.include?(@name) && (attribute_value.nil? || !attribute_value.nil? && attribute_value.empty?) && @params.empty?
 
-          if @parent.attributes[@name].blank? || @params.any?
-            path = build_association_path lambda { "#{@parent.request_path(@params)}#{@opts[:path]}" }
-            @klass.get(path, @params)
-          else
-            @parent.attributes[@name]
+          return @cached_result unless @params.any? || @cached_result.nil?
+          return @parent.attributes[@name] unless @params.any? || @parent.attributes[@name].blank?
+          return @opts[:default].try(:dup) if @parent.new?
+
+          path = build_association_path lambda { "#{@parent.request_path(@params)}#{@opts[:path]}" }
+          @klass.get(path, @params).tap do |result|
+            @cached_result = result unless @params.any?
           end
         end
 
@@ -52,6 +60,13 @@ module Her
           rescue Her::Errors::PathError
             return nil
           end
+        end
+
+        # @private
+        def reset
+          @params = {}
+          @cached_result = nil
+          @parent.attributes.delete(@name)
         end
 
         # Add query parameters to the HTTP request performed to fetch the data
@@ -66,7 +81,7 @@ module Her
         #   user.comments.where(:approved => 1) # Fetched via GET "/users/1/comments?approved=1
         def where(params = {})
           return self if params.blank? && @parent.attributes[@name].blank?
-          self.clone.tap { |a| a.params = a.params.merge(params) }
+          AssociationProxy.new self.clone.tap { |a| a.params = a.params.merge(params) }
         end
         alias all where
 
@@ -83,35 +98,32 @@ module Her
         def find(id)
           return nil if id.blank?
           path = build_association_path lambda { "#{@parent.request_path(@params)}#{@opts[:path]}/#{id}" }
-          @klass.get(path, @params)
+          @klass.get_resource(path, @params)
         end
 
-        # @private
-        def nil?
-          fetch.nil?
+        # Refetches the association and puts the proxy back in its initial state,
+        # which is unloaded. Cached associations are cleared.
+        #
+        # @example
+        #   class User
+        #     include Her::Model
+        #     has_many :comments
+        #   end
+        #
+        #   class Comment
+        #     include Her::Model
+        #   end
+        #
+        #   user = User.find(1)
+        #   user.comments = [#<Comment(comments/2) id=2 body="Hello!">]
+        #   user.comments.first.id = "Oops"
+        #   user.comments.reload # => [#<Comment(comments/2) id=2 body="Hello!">]
+        #   # Fetched again via GET "/users/1/comments"
+        def reload
+          reset
+          fetch
         end
 
-        # @private
-        def kind_of?(thing)
-          fetch.kind_of?(thing)
-        end
-
-        # @private
-        def ==(other)
-          fetch.eql?(other)
-        end
-        alias eql? ==
-
-        # ruby 1.8.7 compatibility
-        # @private
-        def id
-          fetch.id
-        end
-
-        # @private
-        def method_missing(method, *args, &blk)
-          fetch.send(method, *args, &blk)
-        end
       end
     end
   end

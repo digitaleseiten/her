@@ -3,6 +3,7 @@ module Her
     class Relation
       # @private
       attr_accessor :params
+      attr_writer :parent
 
       # @private
       def initialize(parent)
@@ -65,7 +66,7 @@ module Her
       # @private
       def fetch
         @_fetch ||= begin
-          path = @parent.build_request_path(@params)
+          path = @parent.build_request_path(@parent.collection_path, @params)
           method = @parent.method_for(:find)
           @parent.request(@params.merge(:_method => method, :_path => path)) do |parsed_data, response|
             @parent.new_collection(parsed_data)
@@ -84,6 +85,7 @@ module Her
       #   # Fetched via GET "/users/1" and GET "/users/2"
       def find(*ids)
         params = @params.merge(ids.last.is_a?(Hash) ? ids.pop : {})
+        ids = Array(params[@parent.primary_key]) if params.key?(@parent.primary_key)
 
         results = ids.flatten.compact.uniq.map do |id|
           resource = nil
@@ -95,6 +97,7 @@ module Her
           @parent.request(request_params) do |parsed_data, response|
             if response.success?
               resource = @parent.new_from_parsed_data(parsed_data)
+              resource.instance_variable_set(:@changed_attributes, {})
               resource.run_callbacks :find
             else
               return nil
@@ -105,6 +108,50 @@ module Her
         end
 
         ids.length > 1 || ids.first.kind_of?(Array) ? results : results.first
+      end
+
+      # Fetch first resource with the given attributes.
+      #
+      # If no resource is found, returns <tt>nil</tt>.
+      #
+      # @example
+      #   @user = User.find_by(name: "Tobias", age: 42)
+      #   # Called via GET "/users?name=Tobias&age=42"
+      def find_by(params)
+        where(params).first
+      end
+
+      # Fetch first resource with the given attributes, or create a resource
+      # with the attributes if one is not found.
+      #
+      # @example
+      #   @user = User.find_or_create_by(email: "remi@example.com")
+      #
+      #   # Returns the first item in the collection if present:
+      #   # Called via GET "/users?email=remi@example.com"
+      #
+      #   # If collection is empty:
+      #   # POST /users with `email=remi@example.com`
+      #   @user.email # => "remi@example.com"
+      #   @user.new? # => false
+      def find_or_create_by(attributes)
+        find_by(attributes) || create(attributes)
+      end
+
+      # Fetch first resource with the given attributes, or initialize a resource
+      # with the attributes if one is not found.
+      #
+      # @example
+      #   @user = User.find_or_initialize_by(email: "remi@example.com")
+      #
+      #   # Returns the first item in the collection if present:
+      #   # Called via GET "/users?email=remi@example.com"
+      #
+      #   # If collection is empty:
+      #   @user.email # => "remi@example.com"
+      #   @user.new? # => true
+      def find_or_initialize_by(attributes)
+        find_by(attributes) || build(attributes)
       end
 
       # Create a resource and return it

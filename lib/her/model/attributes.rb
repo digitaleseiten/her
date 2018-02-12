@@ -16,7 +16,13 @@ module Her
       #     include Her::Model
       #   end
       #
-      #  User.new(name: "Tobias") # => #<User name="Tobias">
+      #   User.new(name: "Tobias")
+      #   # => #<User name="Tobias">
+      #
+      #   User.new do |u|
+      #     u.name = "Tobias"
+      #   end
+      #   # => #<User name="Tobias">
       def initialize(attributes={})
         attributes ||= {}
         @metadata = attributes.delete(:_metadata) || {}
@@ -25,38 +31,8 @@ module Her
 
         attributes = self.class.default_scope.apply_to(attributes)
         assign_attributes(attributes)
+        yield self if block_given?
         run_callbacks :initialize
-      end
-
-      # Initialize a collection of resources
-      #
-      # @private
-      def self.initialize_collection(klass, parsed_data={})
-        collection_data = klass.extract_array(parsed_data).map do |item_data|
-          resource = klass.new(klass.parse(item_data))
-          resource.run_callbacks :find
-          resource
-        end
-        Her::Collection.new(collection_data, parsed_data[:metadata], parsed_data[:errors])
-      end
-
-      # Use setter methods of model for each key / value pair in params
-      # Return key / value pairs for which no setter method was defined on the model
-      #
-      # @private
-      def self.use_setter_methods(model, params)
-        setter_method_names = model.class.setter_method_names
-        params ||= {}
-        params.inject({}) do |memo, (key, value)|
-          setter_method = key.to_s + '='
-          if setter_method_names.include?(setter_method)
-            model.send(setter_method, value)
-          else
-            key = key.to_sym if key.is_a?(String)
-            memo[key] = value
-          end
-          memo
-        end
       end
 
       # Handles missing methods
@@ -78,13 +54,8 @@ module Her
       end
 
       # @private
-      def respond_to?(method, include_private = false)
-        method.to_s.end_with?('=') || method.to_s.end_with?('?') || @attributes.include?(method) || super
-      end
-
-      # @private
       def respond_to_missing?(method, include_private = false)
-        method.to_s.end_with?('=') || method.to_s.end_with?('?') || @attributes.include?(method) || @attributes.include?(method) || super
+        method.to_s =~ /[?=]$/ || @attributes.include?(method) || super
       end
 
       # Assign new attributes to a resource
@@ -100,7 +71,7 @@ module Her
       def assign_attributes(new_attributes)
         @attributes ||= attributes
         # Use setter methods first
-        unset_attributes = Her::Model::Attributes.use_setter_methods(self, new_attributes)
+        unset_attributes = self.class.use_setter_methods(self, new_attributes)
 
         # Then translate attributes of associations into association instances
         parsed_attributes = self.class.parse_associations(unset_attributes)
@@ -134,7 +105,8 @@ module Her
         @attributes[self.class.primary_key]
       end
 
-      # Return `true` if the other object is also a Her::Model and has matching data
+      # Return `true` if the other object is also a Her::Model and has matching
+      # data
       #
       # @private
       def ==(other)
@@ -155,23 +127,109 @@ module Her
         @attributes.hash
       end
 
+      # Assign attribute value (ActiveModel convention method).
+      #
+      # @private
+      def attribute=(attribute, value)
+        @attributes[attribute] = nil unless @attributes.include?(attribute)
+        self.send(:"#{attribute}_will_change!") if @attributes[attribute] != value
+        @attributes[attribute] = value
+      end
+
+      # Check attribute value to be present (ActiveModel convention method).
+      #
+      # @private
+      def attribute?(attribute)
+        @attributes.include?(attribute) && @attributes[attribute].present?
+      end
+
       module ClassMethods
+
+        # Initialize a single resource
+        #
+        # @private
+        def instantiate_record(klass, parsed_data)
+          if record = parsed_data[:data] and record.kind_of?(klass)
+            record
+          else
+            attributes = klass.parse(record).merge(_metadata: parsed_data[:metadata],
+                                                   _errors: parsed_data[:errors])
+            klass.new(attributes).tap do |record|
+              record.run_callbacks :find
+            end
+          end
+        end
+
+        # Initialize a collection of resources
+        #
+        # @private
+        def instantiate_collection(klass, parsed_data = {})
+          items = klass.extract_array(parsed_data).map do |item|
+            instantiate_record(klass, data: item)
+          end
+          Her::Collection.new(items, parsed_data[:metadata], parsed_data[:errors])
+        end
+
         # Initialize a collection of resources with raw data from an HTTP request
         #
         # @param [Array] parsed_data
         # @private
         def new_collection(parsed_data)
-          Her::Model::Attributes.initialize_collection(self, parsed_data)
+          instantiate_collection(self, parsed_data)
         end
 
         # Initialize a new object with the "raw" parsed_data from the parsing middleware
         #
         # @private
         def new_from_parsed_data(parsed_data)
-          new(parse(parsed_data[:data]).merge :_metadata => parsed_data[:metadata], :_errors => parsed_data[:errors])
+          instantiate_record(self, parsed_data)
         end
 
-        # Define the attributes that will be used to track dirty attributes and validations
+        # Use setter methods of model for each key / value pair in params
+        # Return key / value pairs for which no setter method was defined on the
+        # model
+        #
+        # @private
+        def use_setter_methods(model, params = {})
+          reserved = [:id, model.class.primary_key, *model.class.association_keys]
+          model.class.attributes *params.keys.reject { |k| reserved.include?(k) }
+
+          setter_method_names = model.class.setter_method_names
+          params.each_with_object({}) do |(key, value), memo|
+            setter_method = key.to_s + '='
+            if setter_method_names.include?(setter_method)
+              model.send(setter_method, value)
+            else
+              memo[key.to_sym] = value
+            end
+          end
+        end
+
+        # Define attribute method matchers to automatically define them using
+        # ActiveModel's define_attribute_methods.
+        #
+        # @private
+        def define_attribute_method_matchers
+          attribute_method_suffix '='
+          attribute_method_suffix '?'
+        end
+
+        # Create a mutex for dynamically generated attribute methods or use one
+        # defined by ActiveModel.
+        #
+        # @private
+        def attribute_methods_mutex
+          @attribute_methods_mutex ||= begin
+            if generated_attribute_methods.respond_to? :mu_synchronize
+              generated_attribute_methods
+            else
+              Mutex.new
+            end
+          end
+        end
+
+        # Define the attributes that will be used to track dirty attributes and
+        # validations
         #
         # @param [Array] attributes
         # @example
@@ -180,29 +238,13 @@ module Her
         #     attributes :name, :email
         #   end
         def attributes(*attributes)
-          define_attribute_methods attributes
-
-          attributes.each do |attribute|
-            attribute = attribute.to_sym
-
-            class_eval <<-RUBY, __FILE__, __LINE__ + 1
-              unless instance_methods.include?(:'#{attribute}=')
-                def #{attribute}=(value)
-                  self.send(:"#{attribute}_will_change!") if @attributes[:'#{attribute}'] != value
-                  @attributes[:'#{attribute}'] = value
-                end
-              end
-
-              unless instance_methods.include?(:'#{attribute}?')
-                def #{attribute}?
-                  @attributes.include?(:'#{attribute}') && @attributes[:'#{attribute}'].present?
-                end
-              end
-            RUBY
+          attribute_methods_mutex.synchronize do
+            define_attribute_methods attributes
           end
         end
 
-        # Define the accessor in which the API response errors (obtained from the parsing middleware) will be stored
+        # Define the accessor in which the API response errors (obtained from
+        # the parsing middleware) will be stored
         #
         # @param [Symbol] store_response_errors
         #
@@ -215,7 +257,8 @@ module Her
           store_her_data(:response_errors, value)
         end
 
-        # Define the accessor in which the API response metadata (obtained from the parsing middleware) will be stored
+        # Define the accessor in which the API response metadata (obtained from
+        # the parsing middleware) will be stored
         #
         # @param [Symbol] store_metadata
         #
@@ -230,9 +273,10 @@ module Her
 
         # @private
         def setter_method_names
-          @_her_setter_method_names ||= instance_methods.inject(Set.new) do |memo, method_name|
-            memo << method_name.to_s if method_name.to_s.end_with?('=')
-            memo
+          @_her_setter_method_names ||= begin
+            instance_methods.each_with_object(Set.new) do |method, memo|
+              memo << method.to_s if method.to_s.end_with?('=')
+            end
           end
         end
 
